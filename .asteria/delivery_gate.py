@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -282,13 +283,25 @@ def evaluate(root, base, head, bodies, repo, base_ref, default_branch):
     return result
 
 
+RETRY_DELAYS = (10, 30)  # GitHub 側の一時障害（5xx・時間切れ）を待ち直す間隔（秒）。読むだけの呼び出しに限る
+
+
 def api(url, token, data=None, method=None):
     request = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None,
                                      headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                                               "User-Agent": "asteria-delivery-gate"},
                                      method=method or ("POST" if data is not None else "GET"))
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    for delay in RETRY_DELAYS + (None,):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError) as exc:
+            # 2026-10-03 21:45Z の GitHub の 503 と読み取りの時間切れで、watch と統合役が1回で落ちた。
+            # GET だけ待ち直す（POST・PUT は二重実行になりうるので1回のまま）。4xx は待っても変わらない。
+            transient = not isinstance(exc, urllib.error.HTTPError) or exc.code >= 500
+            if delay is None or not transient or request.get_method() != "GET":
+                raise
+        time.sleep(delay)
 
 
 def ci_results(repo, head, token):

@@ -39,7 +39,7 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           exit 0
       - name: 違反があれば課題を立てる
-        if: steps.watch.outputs.code != '0'
+        if: steps.watch.outputs.code == '1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -48,4 +48,9 @@ jobs:
             { echo "事後の照合で、関門の通過が無いマージ、または直接のpushを見つけた。本人の判断が必要。"; echo; echo '```json'; cat result.json; echo '```'; } > body.md
             gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
           fi
+          exit 1
+      - name: 照合できなければ失敗にする（違反の課題は立てない。次の回で照合し直す）
+        if: steps.watch.outputs.code != '0' && steps.watch.outputs.code != '1'
+        run: |
+          cat result.json
           exit 1

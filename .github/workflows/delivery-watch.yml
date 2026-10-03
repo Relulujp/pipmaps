@@ -1,0 +1,51 @@
+name: delivery-watch
+
+# 既定ブランチへ入った変更を事後に全件照合する。無料プランの非公開リポジトリではブランチ保護が使えず、
+# GitHub側でマージを止められないため、関門を通らずに入った物をここで見つける。仕様：system/specs/delivery.md
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 照合する（照合の起点から全部）
+        id: watch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # PRのコミットを取得する時だけ資格を付ける（作業木の設定には残さない）。PRのコードは実行しない。
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          set +e
+          python3 .asteria/delivery_gate.py --repo "$GITHUB_REPOSITORY" --watch | tee result.json
+          code=${PIPESTATUS[0]}
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: 違反があれば課題を立てる
+        if: steps.watch.outputs.code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="配送の関門を通らずに既定ブランチへ入った変更がある"
+          if ! gh issue list -R "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[0].number' | grep -q .; then
+            { echo "事後の照合で、関門の通過が無いマージ、または直接のpushを見つけた。本人の判断が必要。"; echo; echo '```json'; cat result.json; echo '```'; } > body.md
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+          fi
+          exit 1

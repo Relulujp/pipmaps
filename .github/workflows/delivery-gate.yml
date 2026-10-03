@@ -1,0 +1,73 @@
+name: delivery-gate
+
+# 配送の関門。PRをAIがマージしてよいかを、変更の危険度と証拠で決め、コミットの状態
+# （asteria/delivery-gate）として記録する。仕様：system/specs/delivery.md
+#
+# pull_request_target と issue_comment は、PR側ではなく既定ブランチ側のこのファイルで動く。
+# PR側のコードは実行しない（コミットを取得して差分を読むだけ）。検査器・段の表・本人の公開鍵も
+# 基準側の物を使うので、PRの中でこれらを弱めても、そのPRの判定は変わらない。
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  statuses: write
+
+concurrency:
+  group: delivery-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - name: PRの基準と最新コミットを調べる
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          # PR側が決められる値（ブランチ名）は、形を確かめてから環境変数で渡す。式展開でシェルへ埋め込まない。
+          case "$NUMBER" in ''|*[!0-9]*) echo "bad PR number"; exit 2;; esac
+          data=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER")
+          base=$(jq -r .base.sha <<<"$data"); head=$(jq -r .head.sha <<<"$data"); ref=$(jq -r .base.ref <<<"$data")
+          for sha in "$base" "$head"; do [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "bad sha"; exit 2; }; done
+          [[ "$ref" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || ref="invalid-ref"
+          { echo "base=$base"; echo "head=$head"; echo "ref=$ref"; echo "number=$NUMBER"; } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: PRのコミットを取得する（実行はしない）
+        env:
+          NUMBER: ${{ steps.pr.outputs.number }}
+          TOKEN: ${{ github.token }}
+        run: |
+          # 非公開リポジトリなので、この取得の時だけ資格を付ける（作業木の設定には残さない）。
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" fetch --no-tags origin "pull/$NUMBER/head"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 判定する
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE: ${{ steps.pr.outputs.base }}
+          HEAD: ${{ steps.pr.outputs.head }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          BASE_REF: ${{ steps.pr.outputs.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          # 判定の結果（通過・保留・判定不能）はコミットの状態として付ける。保留はこのジョブの失敗にしない
+          # （保留のたびに赤い×が並ぶのを避ける）。状態を付けられなかった時（終了コード3）だけ失敗にする。
+          set +e
+          python3 .asteria/delivery_gate.py --base "$BASE" --head "$HEAD" --pr "$NUMBER" --base-ref "$BASE_REF" --default-branch "$DEFAULT_BRANCH" --post-status
+          code=$?
+          [ "$code" -le 2 ]

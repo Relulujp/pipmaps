@@ -1,0 +1,96 @@
+{
+ "schema_version": 1,
+ "note": "他のリポジトリへ配る段の表のひな形。ファイルごとに T2→T1→T0 の順で最初に当たった段。どれにも当たらなければ default。仕様は Relulujp/asteria の system/specs/delivery.md。",
+ "order": [
+  "T2",
+  "T1",
+  "T0"
+ ],
+ "tiers": {
+  "T2": {
+   "meaning": "本人の署名（Windows Hello）が無ければマージできない",
+   "paths": [
+    ".asteria/**",
+    ".github/**",
+    ".claude/**",
+    "**/.claude-plugin/**",
+    "**/hooks/hooks.json",
+    "**/hooks/*.ts",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONSTITUTION.md",
+    "**/wrangler*.jsonc",
+    "**/wrangler*.toml",
+    "**/.env*",
+    "**/.dev.vars",
+    "**/*.pem",
+    "**/*.key",
+    "system/delivery/**",
+    "system/owner/**",
+    "**/AGENTS.md",
+    "**/CLAUDE.md",
+    ".codex/**",
+    "**/.mcp.json",
+    "**/.vscode/**",
+    ".devcontainer/**",
+    "**/package.json",
+    "**/tsconfig*.json",
+    ".gitattributes",
+    ".gitmodules",
+    ".cursorrules",
+    "**/pyproject.toml",
+    "**/requirements*.txt",
+    "**/Cargo.toml",
+    "**/Makefile",
+    "**/Dockerfile",
+    ".npmrc",
+    "**/AGENTS.override.md",
+    "**/CLAUDE.local.md",
+    "**/.claude/**",
+    "**/.devcontainer/**",
+    "**/.codex/**",
+    "**/.cursor/**",
+    "**/.cursorrules",
+    "**/.github/**"
+   ]
+  },
+  "T1": {
+   "meaning": "独立した監査の記録（別の文脈のAI）が要る",
+   "paths": [
+    "**/*.py",
+    "**/*.js",
+    "**/*.mjs",
+    "**/*.cjs",
+    "**/*.ts",
+    "**/*.cs",
+    "**/*.ps1",
+    "**/*.sh",
+    "**/*.sql",
+    "**/*.json",
+    "**/*.toml",
+    "**/*.yml",
+    "**/*.yaml",
+    "**/*.html",
+    "**/*.css",
+    "**/*.md"
+   ]
+  },
+  "T0": {
+   "meaning": "CIが緑ならマージしてよい",
+   "paths": [
+    "work/**",
+    "checks/**",
+    "reports/**"
+   ]
+  }
+ },
+ "default": "T1",
+ "bump": {
+  "deleted_files": 5,
+  "deleted_line_ratio": 0.5,
+  "note": "削除が多い時は1段上げる"
+ },
+ "required_checks": [],
+ "watch_from": "8d0caf4909550e0ab4b1e47e3eb97de20f43d86d",
+ "source": "Relulujp/asteria の tools/delivery_sync.py が作った。直接書き換えず、asteria の表を直して配り直す。"
+}

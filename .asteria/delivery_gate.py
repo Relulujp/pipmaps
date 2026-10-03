@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -290,6 +291,26 @@ def api(url, token, data=None, method=None):
         return json.loads(response.read().decode("utf-8"))
 
 
+def ci_results(repo, head, token):
+    """そのコミットの CI の結果 {名前: 結論}。check runs を読めない時（fine-grained の個人トークンには
+    Checks の権限が無い。2026-10-03）は、Actions の実行とジョブから同じ物を読む（Actions: Read-only で読める）。
+    CI は全部 GitHub Actions なので、ジョブ名が check run の名前と同じになる。同じ名前が何度もあれば新しい方。"""
+    try:
+        runs = api(f"https://api.github.com/repos/{repo}/commits/{head}/check-runs?per_page=100", token)["check_runs"]
+        return {run.get("name"): run.get("conclusion") for run in runs}
+    except urllib.error.HTTPError as exc:
+        if exc.code != 403:
+            raise
+    done, stamps = {}, {}
+    workflow_runs = api(f"https://api.github.com/repos/{repo}/actions/runs?head_sha={head}&per_page=100", token)
+    for run in workflow_runs.get("workflow_runs", []):
+        for job in api(f"{run['jobs_url']}?per_page=100", token).get("jobs", []):
+            name, stamp = job.get("name"), job.get("completed_at") or job.get("started_at") or ""
+            if name not in stamps or stamp >= stamps[name]:
+                done[name], stamps[name] = job.get("conclusion"), stamp
+    return done
+
+
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
@@ -346,8 +367,7 @@ def merge(root, repo, pr, token):
         elif verdict.get("derived_manifest") and not watch(root, repo, token)["ok"]:
             # 目録の例外は「main が関門を通った中身だけ」が前提。直接のpushがあれば、目録で正当化させない
             problems.append("事後照合に違反があるため、目録だけのPRをマージしない")
-        runs = api(f"https://api.github.com/repos/{repo}/commits/{head}/check-runs?per_page=100", token)["check_runs"]
-        done = {run.get("name"): run.get("conclusion") for run in runs}
+        done = ci_results(repo, head, token)
         for name in required_checks(root, tip):
             if done.get(name) != "success":
                 problems.append(f"必須のCI {name} が成功していない（{done.get(name)}）")

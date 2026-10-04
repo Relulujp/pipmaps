@@ -63,8 +63,10 @@ def read_policy(root, rev):
 AUDIT_TAG = "asteria-audit"
 OWNER_TAG = "asteria-owner-approval"
 OWNER_KIND = "change-merge"
+DELIVERY_TAG = "asteria-delivery-approval"  # 配り直しの束（admin-op）の署名。PRの中身の一致で T2 の証拠にする（2026-10-04）
+DELIVERY_KIND = "admin-op-batch"
 STATUS_CONTEXT = "asteria/delivery-gate"
-BLOCK = re.compile(r"```(asteria-audit|asteria-owner-approval)\s*\n(.*?)\n```", re.S)
+BLOCK = re.compile(r"```(asteria-audit|asteria-owner-approval|asteria-delivery-approval)\s*\n(.*?)\n```", re.S)
 
 
 class Undecidable(Exception):
@@ -250,6 +252,79 @@ def owner_ok(bodies, repo, head, key, base_ref):
     return None
 
 
+def _signed_by_owner(grant, kind, subject, public):
+    if not isinstance(grant, dict) or grant.get("kind") != kind or grant.get("subject_sha256") != subject:
+        return False
+    unsigned = {k: v for k, v in grant.items() if k != "signature"}
+    import base64
+    try:
+        signature = base64.b64decode(grant.get("signature", ""), validate=True)
+    except (ValueError, TypeError):
+        return False
+    return rsa_verify(public, GRANT_PREFIX + canonical(unsigned), signature)
+
+
+def git_bytes(root, *args):
+    run = subprocess.run(["git", *args], cwd=root, capture_output=True)
+    if run.returncode:
+        raise Undecidable(f"git {args[0]} failed")
+    return run.stdout
+
+
+def delivery_ok(root, bodies, repo, base, head, items, key):
+    """配り直しの束（admin-op の delivery.sync）の署名を、PRの中身の一致で T2 の証拠にする（2026-10-04）。
+
+    本人が署名した束には、配る先ごとに「ファイルのパスと SHA-256」と、署名時の既定ブランチの先端（target_head）が
+    入っている。通す条件：(1) PRの差分がその一覧と完全に一致する（追加・変更だけ、列挙外のファイルが無い、各ファイルの
+    中身のハッシュが同じ）、(2) target_head が基準（今の既定ブランチの先端）の祖先か同じで、列挙されたファイルが
+    target_head から基準まで変わっていない。(2) が無いと、古い束を貼り直して関門を古い版へ戻せる（巻き戻し）。
+    署名は中身に結び付くので、投稿者も期限も見ない（束を別のPRに貼り直しても、同じ中身しか通らない）。ブランチ名も見ない。
+    """
+    public = (int(key["n"], 16), int(key["e"]))
+    for bundle in blocks(bodies, DELIVERY_TAG):
+        if (not isinstance(bundle, dict) or not isinstance(bundle.get("ops"), list)
+                or not isinstance(bundle.get("targets"), list) or len(bundle["ops"]) != len(bundle["targets"])):
+            continue
+        pairs = list(zip(bundle["ops"], bundle["targets"]))
+        subject = hashlib.sha256(canonical({"batch": [{"request": r, "target": t} for r, t in pairs]})).hexdigest()
+        if not _signed_by_owner(bundle.get("grant"), DELIVERY_KIND, subject, public):
+            continue
+        for request, target in pairs:
+            if (not isinstance(request, dict) or not isinstance(target, dict) or request.get("op") != "delivery.sync"
+                    or request.get("repo") != repo or not isinstance(target.get("file_sha256"), dict)):
+                continue
+            if (_tree_matches(root, head, items, target["file_sha256"])
+                    and _unchanged_since(root, target.get("target_head"), base, target["file_sha256"])):
+                return bundle["grant"]
+    return None
+
+
+def _unchanged_since(root, since, base, paths):
+    """署名時の先端（since）が基準の祖先（か同じ）で、配るファイルがその間に変わっていない。
+    新しい配り直しが入った後に古い束を貼り直す巻き戻しを塞ぐ（新しい版が入っていれば、そのファイルは since と基準で違う）。"""
+    if not isinstance(since, str) or not re.fullmatch(r"[0-9a-f]{40}", since):
+        return False
+    if subprocess.run(["git", "merge-base", "--is-ancestor", since, base], cwd=root, capture_output=True).returncode:
+        return False
+    for path in paths:
+        before = subprocess.run(["git", "show", f"{since}:{path}"], cwd=root, capture_output=True)
+        after = subprocess.run(["git", "show", f"{base}:{path}"], cwd=root, capture_output=True)
+        if (before.returncode == 0) != (after.returncode == 0) or before.stdout != after.stdout:
+            return False
+    return True
+
+
+def _tree_matches(root, head, items, expected):
+    if not expected or {path for _s, path, *_ in items} != set(expected):
+        return False
+    for state, path, _added, _deleted, special in items:
+        if state not in "AM" or special or not isinstance(expected.get(path), str):
+            return False
+        if hashlib.sha256(git_bytes(root, "show", f"{head}:{path}")).hexdigest() != expected[path]:
+            return False
+    return True
+
+
 def evaluate(root, base, head, bodies, repo, base_ref, default_branch):
     if base_ref != default_branch:
         # 既定ブランチ以外を基準にしたPRは判定しない。細工した基準で空の差分や別の差分を作り、通過を得る経路を塞ぐ。
@@ -277,9 +352,10 @@ def evaluate(root, base, head, bodies, repo, base_ref, default_branch):
             key = json.loads(git(root, "show", f"{base}:{found[1]}"))
         except (Undecidable, ValueError):
             raise Undecidable("基準側の本人の公開鍵を読めない")
-        grant = owner_ok(bodies, repo, head, key, base_ref)
-        result.update(ok=grant is not None, needs="最新コミットへの本人の署名つき承認",
-                      evidence=grant and {"owner_note": grant.get("owner_note"), "issued_at": grant.get("issued_at")})
+        grant = owner_ok(bodies, repo, head, key, base_ref) or delivery_ok(root, bodies, repo, base, head, items, key)
+        result.update(ok=grant is not None, needs="最新コミットへの本人の署名つき承認（または配り直しの束の署名と中身の一致）",
+                      evidence=grant and {"owner_note": grant.get("owner_note"), "issued_at": grant.get("issued_at"),
+                                          "kind": grant.get("kind")})
     return result
 
 
@@ -287,10 +363,13 @@ RETRY_DELAYS = (10, 30)  # GitHub 側の一時障害（5xx・時間切れ）を�
 
 
 def api(url, token, data=None, method=None):
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+               "User-Agent": "asteria-delivery-gate"}
+    if data is not None:
+        # 本文を送る時は型を明示する。Claude のクラウドセッションの代理は、無いと 415 で拒む（2026-10-03）
+        headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None,
-                                     headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-                                              "User-Agent": "asteria-delivery-gate"},
-                                     method=method or ("POST" if data is not None else "GET"))
+                                     headers=headers, method=method or ("POST" if data is not None else "GET"))
     for delay in RETRY_DELAYS + (None,):
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
@@ -328,11 +407,17 @@ TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
 def pr_comments(repo, pr, token):
-    """リポジトリの持ち主・協力者が書いたコメントだけを証拠として読む。"""
+    """リポジトリの持ち主・協力者が書いたコメントだけを証拠として読む。配り直しの束（署名で検証する）は投稿者を問わない
+    （クラウドの admin-op は App の名義で書く）。"""
     bodies, page = [], 1
     while True:
         batch = api(f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}", token)
-        bodies += [c.get("body", "") for c in batch if c.get("author_association") in TRUSTED_ASSOCIATIONS]
+        for c in batch:
+            if c.get("author_association") in TRUSTED_ASSOCIATIONS:
+                bodies.append(c.get("body", ""))
+            else:  # 持ち主・協力者以外の本文からは、署名で検証する束だけを切り出す（監査や承認のブロックは拾わない）
+                bodies += [f"```{DELIVERY_TAG}\n{text}\n```" for name, text in BLOCK.findall(c.get("body") or "")
+                           if name == DELIVERY_TAG]
         if len(batch) < 100:
             return bodies
         page += 1

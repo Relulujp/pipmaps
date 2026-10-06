@@ -68,6 +68,6 @@
   "note": "削除が多い時は1段上げる"
  },
  "required_checks": [],
- "watch_from": "72e5e4ae7dffef0681b6068680a7a351412ec6ec",
+ "watch_from": "719e8844d300d91c197efd4913a352d6561be8c3",
  "source": "Relulujp/asteria の tools/delivery_sync.py が作った。直接書き換えず、asteria の表を直して配り直す。"
 }

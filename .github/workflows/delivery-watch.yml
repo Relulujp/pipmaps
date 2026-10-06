@@ -6,7 +6,8 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "17 */6 * * *"
+    # 1日1回（2026-10-06 本人指定。各リポジトリで6時間ごとだと月約1,300分になるため）。main への push の時にも回る。
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:

@@ -6,7 +6,9 @@
 
   T0  CIが緑ならよい
   T1  そのPRの最新コミットに対する、独立した監査の記録（PRのコメント）が要る
-  T2  そのPRの最新コミットに対する、本人の署名（Windows Hello）つき承認（PRのコメント）が要る
+  T2  そのPRの最新コミットに対する、本人の署名（Windows Hello）つき承認（PRのコメント）が要る。
+      asteria の表は 2026-10-05 に T2 を廃止した（本人の決定）。配った先の表に T2 が残る間だけ使う。
+      段の表に T2 が無ければ、最上位は T1 になる。
 
   python3 tools/delivery_gate.py --base <sha> --head <sha> [--comments comments.json]
   python3 tools/delivery_gate.py --base <sha> --head <sha> --repo owner/name --pr 12 [--post-status]
@@ -82,6 +84,21 @@ def git(root, *args):
 
 
 SPECIAL_MODES = {"120000": "シンボリックリンク", "160000": "サブモジュール"}
+# data_paths（直接の更新の例外）に入れてはいけない、関門と入口のパス。段の表に依らない（data_update_paths）。
+# 2026-10-05 に廃止した T2 の和（origin/main 34f7b93 の tiers.json と tiers-template.json。CODEOWNERS・codeowners_check を除く）を
+# 機械で写した物。T2 の時と同じ守りを、T2 の無い表でも保つ。
+SELF_PATHS = ["AGENTS.md", "CONSTITUTION.md", "RULES.md", "CLAUDE.md", "system/policy.json", "system/delivery/**",
+              "system/owner/**", "tools/delivery_gate.py", "tools/asteria_owner.py",
+              "tools/asteria_engine/owner_presence.py", "tools/asteria_engine/authority.py", ".github/**",
+              "**/.env*", "**/.dev.vars", "package.manifest.json", "routines/common.md", "routines/registry.json",
+              "routines/jobs/pr-steward.md", "routines/jobs/auditor.md", "adapters/delivery.md", ".claude/**",
+              "**/.claude-plugin/**", "**/hooks/hooks.json", "**/hooks/*.ts", "tools/delivery_sync.py",
+              ".asteria/**", "tools/delivery_integrate.py", "**/AGENTS.md", "**/CLAUDE.md", ".codex/**",
+              "**/.mcp.json", "**/.vscode/**", ".devcontainer/**", ".gitattributes", ".gitmodules", ".cursorrules",
+              "**/AGENTS.override.md", "**/CLAUDE.local.md", "**/.claude/**", "**/.devcontainer/**", "**/.codex/**",
+              "**/.cursor/**", "**/.cursorrules", "**/.github/**", "tools/asteria_engine/admin_op.py",
+              "tools/plugin_sync.sh", "tools/app_token.py", "**/*.pem", "**/*.key"]
+SELF_POLICY = {"order": ["self"], "tiers": {"self": {"paths": SELF_PATHS}}, "default": None}
 
 
 def changes(root, base, head):
@@ -127,9 +144,10 @@ def classify(items, policy):
     order = policy["order"]
     if not items:
         return "T0", {}, []
-    files = {path: ("T2" if special else tier_of(path, policy)) for _, path, _, _, special in items}
+    top = order[0]  # シンボリックリンク・サブモジュールは表の最上位の段（T2 が無い表では T1）
+    files = {path: (top if special else tier_of(path, policy)) for _, path, _, _, special in items}
     tier = min(files.values(), key=order.index)
-    reasons = [f"{path} は{special}（T2）" for _, path, _, _, special in items if special]
+    reasons = [f"{path} は{special}（{top}）" for _, path, _, _, special in items if special]
     bump = policy.get("bump", {})
     deleted_files = sum(1 for item in items if item[0] == "D")
     added = sum(item[2] for item in items)
@@ -186,7 +204,7 @@ def derived_manifest_ok(root, base, head, items, policy):
     # マージ後の main の木を表さない（2026-10-03 独立監査）
     if subprocess.run(["git", "merge-base", "--is-ancestor", base, head], cwd=root, capture_output=True).returncode:
         return False
-    try:  # 読めない・重複キー・作り直せない時は、この例外を使わず元の段（T2）のままにする
+    try:  # 読めない・重複キー・作り直せない時は、この例外を使わず元の段（T1。古い表では T2）のままにする
         old = json.loads(git(root, "show", f"{base}:{target}"), object_pairs_hook=_no_duplicates)
         new = json.loads(git(root, "show", f"{head}:{target}"), object_pairs_hook=_no_duplicates)
         if not isinstance(old, dict) or not isinstance(new, dict):
@@ -227,6 +245,35 @@ def audit_ok(bodies, head):
                 and isinstance(record.get("reviewer"), str) and record["reviewer"].strip()
                 and isinstance(record.get("checked"), list) and record["checked"]):
             return record
+    return None
+
+
+def audit_carried(root, base, head, bodies, policy):
+    """最新コミットの記録が無い時、PR 内の先行コミットへの合格記録を引き継げるか。
+    記録の head が基準の子孫かつ最新 head の祖先で、その後の変更が基準側の段の表で T0（記録・案件）だけなら、
+    T1 の証拠として扱う（2026-10-05 本人指示：push ごとの監査で軽微修正が遅れる）。T1・T2 の変更が1つでもあれば引き継がない。"""
+    records = list(blocks(bodies, AUDIT_TAG))
+    if any(isinstance(r, dict) and r.get("head") == head and r.get("verdict") != "pass" for r in records):
+        return None  # 最新コミットに不合格の記録があれば、先行コミットの合格を引き継がない（2026-10-05 監査）
+    for record in records:
+        if not (isinstance(record, dict) and record.get("verdict") == "pass"
+                and isinstance(record.get("reviewer"), str) and record["reviewer"].strip()
+                and isinstance(record.get("checked"), list) and record["checked"]):
+            continue
+        since = record.get("head")
+        if not isinstance(since, str) or not re.fullmatch(r"[0-9a-f]{40}", since) or since == head:
+            continue
+        if subprocess.run(["git", "merge-base", "--is-ancestor", since, head], cwd=root, capture_output=True).returncode:
+            continue
+        if subprocess.run(["git", "merge-base", "--is-ancestor", base, since], cwd=root, capture_output=True).returncode:
+            continue
+        try:
+            later = changes(root, since, head)
+        except Undecidable:
+            continue
+        tier, _files, _reasons = classify(later, policy)
+        if tier == "T0":
+            return {**record, "carried_from": since}
     return None
 
 
@@ -344,9 +391,11 @@ def evaluate(root, base, head, bodies, repo, base_ref, default_branch):
     if tier == "T0":
         result.update(ok=True, needs="CIが緑")
     elif tier == "T1":
-        record = audit_ok(bodies, head)
-        result.update(ok=record is not None, needs="最新コミットへの独立監査の記録",
-                      evidence=record and {k: record.get(k) for k in ("reviewer", "verdict")})
+        record = audit_ok(bodies, head) or audit_carried(root, base, head, bodies, policy)
+        if record and record.get("carried_from"):
+            result["reasons"].append(f"監査記録（{record['carried_from'][:7]}）の後の変更は T0 だけなので記録を引き継ぐ")
+        result.update(ok=record is not None, needs="最新コミットへの独立監査の記録（その後が T0 の変更だけなら先行コミットの記録でよい）",
+                      evidence=record and {k: record.get(k) for k in ("reviewer", "verdict", "carried_from")})
     else:
         try:
             key = json.loads(git(root, "show", f"{base}:{found[1]}"))
@@ -482,13 +531,14 @@ def data_update_paths(root, sha):
     """そのコミットが、親1つの直接の変更で、親の版の段の表の data_paths に列挙されたパスだけを
     状態M・モード不変で変えた物なら、その変更したパスの一覧を返す。それ以外（マージ、追加・削除・改名・
     特殊なモード・モード変更（例：100644→100755）・列挙外のパス、data_paths の無いリポジトリ）は
-    None（＝例外を使わず、今までどおり違反として扱う）。data_paths は段の表（T2）で足すので、
+    None（＝例外を使わず、今までどおり違反として扱う）。data_paths は段の表で足すので、
     ここも基準側＝親の版で読む。モードまで直接見る（changes() の special は symlink/submodule しか見ないため）。
 
     data_paths の照合はGitのパスと完全一致（大文字小文字も区別する。段の分類＝tier_of が大文字小文字を
-    無視するのとは別）。data_paths 自身に、その段の表に照らしてT2になるパス（段の表自身・鍵・
-    .asteria/**・.github/**・.claude/** など）が1つでも入っていたら、data_paths は丸ごと無効にする
-    （段の表を使って自分自身の保護を外す経路を塞ぐ。2026-10-03 Astraの指摘）。
+    無視するのとは別）。data_paths 自身に、関門と入口のパス（SELF_PATHS：廃止した T2 の和。段の表自身・鍵・
+    .asteria/**・.github/**・.claude/**・AGENTS.md など）か、その段の表でT2になるパスが1つでも入っていたら、
+    data_paths は丸ごと無効にする（段の表を使って自分自身の保護を外す経路を塞ぐ。2026-10-03 Astraの指摘）。
+    SELF_PATHS は旧 T2 の全パスの写しなので、T2 の無い表でも T2 の時と同じ守りが効く（2026-10-05）。
     """
     parents = git(root, "rev-list", "--parents", "-n", "1", sha).split()[1:]
     if len(parents) != 1:
@@ -498,7 +548,7 @@ def data_update_paths(root, sha):
     except Undecidable:
         return None
     raw_paths = policy.get("data_paths", [])
-    if not raw_paths or any(tier_of(p, policy) == "T2" for p in raw_paths):
+    if not raw_paths or any(tier_of(p, policy) == "T2" or tier_of(p, SELF_POLICY) == "self" for p in raw_paths):
         return None
     data_paths = set(raw_paths)
     fields = git(root, "diff", "--raw", "-z", "-M", f"{parents[0]}...{sha}").split("\0")
@@ -525,7 +575,7 @@ def watch(root, repo, token):
     手元でやり直した関門の判定が通っていなければならない。それ以外（直接のpush、手元でのmergeのpush、
     関門を通っていないマージ）と、起点が履歴から消えた（force-push）事を違反にする。日時では絞らない。
     例外：親1つの直接のコミットが data_paths に列挙されたパスだけを変えた物は、違反でなく data_updates に残す
-    （段の表を data_paths で弱めるPR自体はT2で本人の署名が要るので、ここでは件数と最新のshaだけ残す）。
+    （段の表を data_paths で弱めるPR自体は関門の最上位の段を通るので、ここでは件数と最新のshaだけ残す）。
     """
     check_origin(root, repo)
     default = api(f"https://api.github.com/repos/{repo}", token)["default_branch"]

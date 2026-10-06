@@ -1,14 +1,13 @@
 {
  "schema_version": 1,
- "note": "他のリポジトリへ配る段の表のひな形。ファイルごとに T2→T1→T0 の順で最初に当たった段。どれにも当たらなければ default。仕様は Relulujp/asteria の system/specs/delivery.md。",
+ "note": "他のリポジトリへ配る段の表のひな形。ファイルごとに T1→T0 の順で最初に当たった段。どれにも当たらなければ default。仕様は Relulujp/asteria の system/specs/delivery.md。",
  "order": [
-  "T2",
   "T1",
   "T0"
  ],
  "tiers": {
-  "T2": {
-   "meaning": "本人の署名（Windows Hello）が無ければマージできない",
+  "T1": {
+   "meaning": "独立した監査の記録（別の文脈のAI）が要る。本人の署名の段（T2）は 2026-10-05 本人の決定で廃止し、その対象もここに含める",
    "paths": [
     ".asteria/**",
     ".github/**",
@@ -34,12 +33,7 @@
     "**/.codex/**",
     "**/.cursor/**",
     "**/.cursorrules",
-    "**/.github/**"
-   ]
-  },
-  "T1": {
-   "meaning": "独立した監査の記録（別の文脈のAI）が要る",
-   "paths": [
+    "**/.github/**",
     "**/*.py",
     "**/*.js",
     "**/*.mjs",
@@ -74,6 +68,6 @@
   "note": "削除が多い時は1段上げる"
  },
  "required_checks": [],
- "watch_from": "c9a6c61f476d4437353bcd4dabde0ac3b7925828",
+ "watch_from": "72e5e4ae7dffef0681b6068680a7a351412ec6ec",
  "source": "Relulujp/asteria の tools/delivery_sync.py が作った。直接書き換えず、asteria の表を直して配り直す。"
 }
